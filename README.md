@@ -18,25 +18,28 @@ opt_other = torch.optim.AdamW(other, lr=3e-4)
 
 ## Install
 ```bash
-pip install git+https://github.com/katop1234/ember.git
+pip install git+https://github.com/katop1234/ember.git   # package, sharding-aware
 ```
-PyTorch ≥ 2.4.
+Or just copy the single-file [`ember.py`](ember.py) for single-device use. PyTorch ≥ 2.4.
 
 ## Distributed
-Ember's state is ~1 MB, so **replicate it like a LayerNorm parameter — don't shard it**
-(exclude it from your ZeRO optimizer partition). The framework still shards the embedding
-*parameter* (FSDP2/TP); Ember rides along — `r` (per-row) stays local, and `c` (per-col)
-plus `mean` need one all-reduce (`D` floats + a scalar) over the row-shard group.
+Ember runs under FSDP2, tensor parallelism, and ZeRO. Its state is ~1 MB, so **replicate it
+— don't shard it.** Flat-sharding a tiny, structured state (`v_row`/`v_col`) just adds
+communication for no memory; keep it replicated and out of your ZeRO partition.
+
+When the embedding gradient is sharded, only the column factor needs syncing — one small
+all-reduce (`D` floats + a scalar) over the row-shard group. `Ember` does this automatically
+for DTensor (FSDP2), or pass `row_shard_group=<group>` for non-DTensor frameworks.
 
 | setup | what you do |
 |---|---|
-| single-device / DDP | nothing |
+| single-device / DDP / ZeRO-1 | nothing — full gradient, replicated state |
 | FSDP2 (`fully_shard`) | nothing — auto-detected from the DTensor placement |
-| Megatron / custom | `Ember(emb, row_shard_group=<group>)` |
-| DeepSpeed ZeRO | keep the embedding out of the ZeRO optimizer, step Ember around `engine.step()` |
+| Megatron / custom TP | `Ember(emb, row_shard_group=<group>)` |
+| DeepSpeed ZeRO-2/3 | keep the embedding's state replicated (out of the ZeRO partition) |
 
-`Ember` is bit-identical to the single-device `EmberReference` whether the table is
-replicated or row-sharded (`tests/`).
+Bit-identical to the single-device reference whether the table is replicated or row-sharded
+(`tests/`).
 
 ```bash
 python tests/test_reference.py                          # single-device
