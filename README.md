@@ -1,76 +1,58 @@
 # Ember
 
-A drop-in optimizer for the **token-embedding table** that matches AdamW quality at
-**O(V + D)** optimizer state instead of Adam's **O(2·V·D)** — roughly **1500× less**
-optimizer memory for the embedding at a 50K vocab, and it scales with vocabulary.
+A drop-in optimizer for the **token-embedding table**. Matches AdamW quality at **O(V + D)**
+optimizer state instead of Adam's **O(2·V·D)** — about **1500× less** optimizer memory for
+the embedding at a 50K vocab, and the gap grows with vocabulary.
 
-Ember keeps a row × column *factored* second moment and no first moment. It's a
-diagonal-Fisher preconditioner specialized to the embedding's structure: the per-coordinate
-update scale factorizes (token participation × feature), so storing the full `V×D` second
-moment is unnecessary.
+Ember stores a row × column factored second moment and no first moment. The embedding's
+per-coordinate update scale factorizes (token participation × feature), so the full `V×D`
+second moment is redundant — `V + D` captures it.
 
 ```python
 from ember import Ember, split_embedding_params
 
-emb_params, other_params = split_embedding_params(model)
-opt_emb   = Ember(emb_params, lr=1e-3)                  # ~1 MB state
-opt_other = torch.optim.AdamW(other_params, lr=3e-4)    # or your existing optimizer
+emb, other = split_embedding_params(model)
+opt_emb   = Ember(emb, lr=1e-3)
+opt_other = torch.optim.AdamW(other, lr=3e-4)
 ```
 
 ## Install
 ```bash
-pip install git+https://github.com/<you>/ember.git
+pip install git+https://github.com/katop1234/ember.git
 ```
-Requires PyTorch ≥ 2.4 (DTensor / FSDP2). Single-device and DDP need nothing extra.
+PyTorch ≥ 2.4.
 
-## Distributed — one rule
-> **Place Ember's state where your framework places a LayerNorm parameter: replicated,
-> kept consistent by the gradient all-reduce you already do.** Exclude it from your ZeRO
-> optimizer partition — it's ~1 MB, there is nothing to save by sharding it (and sharding
-> *breaks* the row/col factoring, since ZeRO flat-shards across row boundaries).
+## Distributed
+Ember's state is ~1 MB, so **replicate it like a LayerNorm parameter — don't shard it**
+(exclude it from your ZeRO optimizer partition). The framework still shards the embedding
+*parameter* (FSDP2/TP); Ember rides along — `r` (per-row) stays local, and `c` (per-col)
+plus `mean` need one all-reduce (`D` floats + a scalar) over the row-shard group.
 
-The framework can still shard the embedding **parameter** (FSDP2/TP) for activation and
-param memory. Ember rides along: `r` (per-row) shards with the rows for free, and `c`
-(per-col) + `mean(r)` need **one small all-reduce over the row-shard group** — `D` floats
-plus a scalar. That's the entire communication cost. Compared to Adam (needs ZeRO to shard
-its bulky embedding state) or Muon (needs all-to-all to orthonormalize sharded matrices),
-Ember's distributed footprint is negligible.
+| setup | what you do |
+|---|---|
+| single-device / DDP | nothing |
+| FSDP2 (`fully_shard`) | nothing — auto-detected from the DTensor placement |
+| Megatron / custom | `Ember(emb, row_shard_group=<group>)` |
+| DeepSpeed ZeRO | keep the embedding out of the ZeRO optimizer, step Ember around `engine.step()` |
 
-| setup | what Ember does | the change you make |
-|---|---|---|
-| single-device / DDP | identical to reference, **zero extra comm** | nothing |
-| **FSDP2** (`fully_shard`, dim-0) | `c`+`mean` all-reduce over the row-shard sub-mesh | `fully_shard` the embedding; give its param to Ember |
-| **Megatron / TP** (vocab-parallel) | `c`+`mean` all-reduce over the tensor-parallel group | route the embedding param to Ember |
-| **DeepSpeed ZeRO-1/2/3** | keep `r`/`c` replicated, step locally | put the embedding in a **separate param group excluded from ZeRO**; rest stays in your ZeRO+Adam |
-
-`Ember` reads a param's DTensor mesh/placement automatically — if rows aren't sharded it's
-exactly the single-device reference with no communication. For non-DTensor frameworks
-(Megatron tensor-parallel, custom) pass the group explicitly:
-`Ember(emb_params, row_shard_group=<group>)`.
-
-## Correctness
-`Ember` produces **bit-identical** updates to the single-device `EmberReference`, whether
-the table is replicated or row-sharded — verified in `tests/`. You're getting the same
-optimizer, placed correctly, not an approximation.
+`Ember` is bit-identical to the single-device `EmberReference` whether the table is
+replicated or row-sharded (`tests/`).
 
 ```bash
 python tests/test_reference.py                          # single-device
-torchrun --nproc_per_node=2 tests/test_distributed.py   # sharded == reference, bit-for-bit
-torchrun --nproc_per_node=2 examples/fsdp2_minimal.py   # runnable FSDP2 example
+torchrun --nproc_per_node=2 tests/test_distributed.py   # sharded == reference
+torchrun --nproc_per_node=2 examples/fsdp2_minimal.py
 ```
+
+## When it helps
+When the embedding optimizer state is a meaningful fraction of memory: large vocab,
+small/mid models, per-layer embeddings, or limited GPUs. At hyperscale MoE the embedding is
+a rounding error — it won't help there.
 
 ## Files
 ```
 ember/
-  ember_reference.py   # the spec — single-device, read this first
-  ember.py             # distributed: DTensor-aware, the v_col all-reduce
+  ember_reference.py   # the spec — read first
+  ember.py             # distributed (DTensor-aware)
   param_utils.py       # split_embedding_params(model)
 ```
-
-## Scope (stated honestly)
-Optimizer-state memory only matters when you're **memory-bound** — large vocab, large
-model, or per-layer embeddings (the embedding fraction grows with vocab). Ember's win is
-biggest for **vocab-heavy, lightly-sharded** training (multilingual / on-device /
-fine-tuning); at hyperscale MoE with thousands of GPUs the embedding is a rounding error
-and sharding already amortizes it. Use it where the embedding optimizer state is a real
-slice of your budget.
