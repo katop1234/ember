@@ -45,9 +45,10 @@ torchrun --nproc_per_node=2 examples/fsdp2_minimal.py
 ```
 
 ## When it helps
-When the embedding optimizer state is a meaningful fraction of memory: large vocab,
-small/mid models, per-layer embeddings, or limited GPUs. At hyperscale MoE the embedding is
-a rounding error — it won't help there.
+Free the embedding optimizer state and spend that memory on batch size, context length, or
+model capacity. The win grows with vocabulary, so it's especially handy for large or
+multilingual vocabularies, per-layer embeddings, and memory-bound fine-tuning — but it's a
+clean drop-in for any embedding table.
 
 ## Files
 ```
