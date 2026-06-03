@@ -9,8 +9,9 @@ per-coordinate update scale factorizes (token participation × feature), so the 
 second moment is redundant — `V + D` captures it.
 
 ```python
+import torch
 from ember import Ember
-from helpers import split_embedding_params
+from helpers import split_embedding_params   # helpers.py — a 12-line routing convenience
 
 emb, other = split_embedding_params(model)
 opt_emb   = Ember(emb, lr=1e-3)
