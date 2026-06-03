@@ -9,7 +9,8 @@ per-coordinate update scale factorizes (token participation × feature), so the 
 second moment is redundant — `V + D` captures it.
 
 ```python
-from ember import Ember, split_embedding_params
+from ember import Ember
+from helpers import split_embedding_params
 
 emb, other = split_embedding_params(model)
 opt_emb   = Ember(emb, lr=1e-3)
@@ -18,9 +19,10 @@ opt_other = torch.optim.AdamW(other, lr=3e-4)
 
 ## Install
 ```bash
-pip install git+https://github.com/katop1234/ember.git   # package, sharding-aware
+pip install git+https://github.com/katop1234/ember.git
 ```
-Or just copy the single-file [`ember.py`](ember.py) for single-device use. PyTorch ≥ 2.4.
+Or just copy [`ember.py`](ember.py) — it's the whole optimizer in one file (single-device,
+and sharding-aware when DTensor is available). PyTorch ≥ 2.4.
 
 ## Distributed
 Ember runs under FSDP2, tensor parallelism, and ZeRO. Its state is ~1 MB, so **replicate it
@@ -38,13 +40,14 @@ for DTensor (FSDP2), or pass `row_shard_group=<group>` for non-DTensor framework
 | Megatron / custom TP | `Ember(emb, row_shard_group=<group>)` |
 | DeepSpeed ZeRO-2/3 | keep the embedding's state replicated (out of the ZeRO partition) |
 
-Bit-identical to the single-device reference whether the table is replicated or row-sharded
-(`tests/`).
+Bit-identical to single device whether the table is replicated or row-sharded. State is
+**fp32** (mixed-precision safe), checkpoints with the standard optimizer `state_dict`, and
+the only communication is the `O(D)` column all-reduce — small enough that no compute/comms
+overlap is needed.
 
 ```bash
-python tests/test_reference.py                          # single-device
-torchrun --nproc_per_node=2 tests/test_distributed.py   # sharded == reference
-torchrun --nproc_per_node=2 examples/fsdp2_minimal.py
+python test.py                          # single-device tests + state_dict round-trip
+torchrun --nproc_per_node=2 test.py     # sharded == single-device (bit-exact) + FSDP2 demo
 ```
 
 ## When it helps
@@ -55,8 +58,7 @@ clean drop-in for any embedding table.
 
 ## Files
 ```
-ember/
-  ember_reference.py   # the spec — read first
-  ember.py             # distributed (DTensor-aware)
-  param_utils.py       # split_embedding_params(model)
+ember.py     # the optimizer — single-device + distributed, one file
+helpers.py   # split_embedding_params + a tiny model
+test.py      # tests + FSDP2 demo
 ```
