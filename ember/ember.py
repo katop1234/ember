@@ -25,8 +25,8 @@ except Exception:  # older torch
     DTensor = ()
 
 
-def _row_shard_group(p):
-    """The process group p is sharded over along dim 0, or None if local/replicated."""
+def _autodetect_row_shard_group(p):
+    """The process group p is sharded over along dim 0 (DTensor only), or None."""
     if isinstance(p, DTensor):
         for dim, pl in enumerate(p.placements):
             if pl.is_shard() and pl.dim == 0:
@@ -39,8 +39,14 @@ def _local(x):
 
 
 class Ember(torch.optim.Optimizer):
-    def __init__(self, params, lr=1e-3, beta2=0.999, eps=1e-8, weight_decay=0.0):
-        defaults = dict(lr=lr, beta2=beta2, eps=eps, weight_decay=weight_decay)
+    def __init__(self, params, lr=1e-3, beta2=0.999, eps=1e-8, weight_decay=0.0,
+                 row_shard_group=None):
+        """row_shard_group: process group the embedding rows are sharded over. Leave None
+        for FSDP2/DTensor (auto-detected) or replicated/DDP (no sharding). Set it explicitly
+        for frameworks that don't expose DTensor placements (Megatron tensor-parallel,
+        DeepSpeed). Can also be set per param-group."""
+        defaults = dict(lr=lr, beta2=beta2, eps=eps, weight_decay=weight_decay,
+                        row_shard_group=row_shard_group)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -52,7 +58,8 @@ class Ember(torch.optim.Optimizer):
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                pg = _row_shard_group(p)          # None unless rows are sharded
+                # explicit group (Megatron/DeepSpeed) overrides DTensor auto-detect (FSDP2)
+                pg = group.get("row_shard_group") or _autodetect_row_shard_group(p)
                 p_l, g_l = _local(p), _local(p.grad)
                 if p_l.dim() != 2:
                     raise ValueError("Ember is for 2-D embedding tables (V x D).")
