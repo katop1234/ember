@@ -44,7 +44,11 @@ Ember's distributed footprint is negligible.
 | **DeepSpeed ZeRO-1/2/3** | keep `r`/`c` replicated, step locally | put the embedding in a **separate param group excluded from ZeRO**; rest stays in your ZeRO+Adam |
 
 `Ember` reads a param's DTensor mesh/placement automatically — if rows aren't sharded it's
-exactly the single-device reference with no communication.
+exactly the single-device reference with no communication. For non-DTensor frameworks pass
+the group explicitly: `Ember(emb_params, row_shard_group=<group>)`.
+
+Raw carve-out helpers for the invasive frameworks live in `ember/integrations/`
+(`deepspeed.py`, `megatron.py`) — recipes + thin wrappers, adapt to your version.
 
 ## Correctness
 `Ember` produces **bit-identical** updates to the single-device `EmberReference`, whether
