@@ -45,11 +45,6 @@ Bit-identical to single device whether the table is replicated or row-sharded. S
 the only communication is the `O(D)` column all-reduce — small enough that no compute/comms
 overlap is needed.
 
-```bash
-python test.py                          # single-device tests + state_dict round-trip
-torchrun --nproc_per_node=2 test.py     # sharded == single-device (bit-exact) + FSDP2 demo
-```
-
 ## When it helps
 Free the embedding optimizer state and spend that memory on batch size, context length, or
 model capacity. The win grows with vocabulary, so it's especially handy for large or
@@ -59,5 +54,4 @@ clean drop-in for any embedding table.
 ## Files
 ```
 ember.py     # the optimizer + split_embedding_params — one file
-test.py      # tests + FSDP2 demo
 ```
