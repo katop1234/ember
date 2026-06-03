@@ -29,6 +29,7 @@ That reduction is auto-detected for DTensor params (FSDP2); for other frameworks
 `row_shard_group=<process group>`. The result is bit-identical to single device either way.
 """
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 
 try:
@@ -113,3 +114,25 @@ class Ember(torch.optim.Optimizer):
                     p_l.mul_(1 - lr * wd)
                 p_l.addcdiv_(g_l, denom.to(p_l.dtype), value=-lr)
         return loss
+
+
+def split_embedding_params(model, extra_names=()):
+    """Route the embedding to Ember, the rest to your optimizer:
+
+        emb, other = split_embedding_params(model)
+        opt_emb, opt_other = Ember(emb, lr=1e-3), torch.optim.AdamW(other, lr=3e-4)
+
+    Embedding = the .weight of any nn.Embedding, or any 2-D parameter whose name contains
+    embed / wte / tok_emb / word_embeddings (+ `extra_names`). Tied weights de-duped.
+    """
+    keys = ("embed", "wte", "tok_emb", "word_embeddings") + tuple(extra_names)
+    emb_ids = {id(m.weight) for m in model.modules()
+               if isinstance(m, nn.Embedding) and m.weight is not None}
+    emb, other, seen = [], [], set()
+    for name, p in model.named_parameters():
+        if id(p) in seen:
+            continue
+        seen.add(id(p))
+        is_emb = id(p) in emb_ids or (p.dim() == 2 and any(k in name.lower() for k in keys))
+        (emb if is_emb else other).append(p)
+    return emb, other

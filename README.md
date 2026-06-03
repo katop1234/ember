@@ -10,8 +10,7 @@ second moment is redundant — `V + D` captures it.
 
 ```python
 import torch
-from ember import Ember
-from helpers import split_embedding_params   # helpers.py — a 12-line routing convenience
+from ember import Ember, split_embedding_params
 
 emb, other = split_embedding_params(model)
 opt_emb   = Ember(emb, lr=1e-3)
@@ -59,7 +58,6 @@ clean drop-in for any embedding table.
 
 ## Files
 ```
-ember.py     # the optimizer — single-device + distributed, one file
-helpers.py   # split_embedding_params + a tiny model
+ember.py     # the optimizer + split_embedding_params — one file
 test.py      # tests + FSDP2 demo
 ```

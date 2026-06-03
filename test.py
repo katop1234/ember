@@ -5,11 +5,21 @@
 """
 import os
 import torch
+import torch.nn as nn
 
-from ember import Ember
-from helpers import split_embedding_params, TinyLM
+from ember import Ember, split_embedding_params
 
 V, D = 2048, 64
+
+
+class _TinyLM(nn.Module):
+    def __init__(self, vocab=V, dim=D):
+        super().__init__()
+        self.emb = nn.Embedding(vocab, dim)
+        self.head = nn.Linear(dim, vocab, bias=False)
+
+    def forward(self, x):
+        return self.head(self.emb(x))
 
 
 def sparse_grad(seed):
@@ -77,7 +87,7 @@ def demo_fsdp2():
     from torch.distributed.fsdp import fully_shard
 
     torch.manual_seed(0)
-    model = TinyLM(V, D)
+    model = _TinyLM(V, D)
     fully_shard(model.emb); fully_shard(model)
     emb, other = split_embedding_params(model)
     opt_emb, opt_other = Ember(emb, lr=1e-3), torch.optim.AdamW(other, lr=3e-4)
