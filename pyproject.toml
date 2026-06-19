@@ -9,7 +9,7 @@ description = "Ember: an O(V+D) embedding optimizer — Adam quality at ~1500x l
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-dependencies = ["torch>=2.4"]
+dependencies = ["torch>=2.1"]
 
 [tool.setuptools]
 py-modules = ["ember"]

@@ -1,4 +1,4 @@
-"""Ember — an O(V+D) optimizer for the token-embedding table.
+"""Ember — an O(V+D) optimizer for the token-embedding / LM-head table.
 
 Adam keeps two moments per weight, so for a V x D embedding its optimizer state is 2*V*D
 (e.g. ~300 MB at a 50K vocab x 768 dim). Ember matches AdamW's quality on the embedding
@@ -8,9 +8,24 @@ How: an embedding's per-coordinate update scale factorizes. A token row's gradie
 depends on how often that token appears (participation); a feature column's scale depends on
 that feature. So instead of a full V x D second moment, Ember keeps a per-row vector r and a
 per-col vector c and reconstructs the rank-1 estimate v[i,j] = r[i]*c[j]/mean(r) (the
-Adafactor factorization). It uses no first moment.
+Adafactor factorization). It uses no first moment; bias correction and beta2=0.999 are
+lifted straight from Adam.
 
-Update, for embedding gradient G in R^{V x D} (sparse over V — only rows of tokens in the
+Drop-in API (identical call to torch.optim.Adam):
+
+    from ember import Ember
+    # was: opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    opt = Ember(model.parameters(), lr=1e-3)
+
+It accepts the Adam constructor signature (`lr`, `betas`, `eps`, `weight_decay`). Ember has
+no first moment, so `betas[0]` is ignored and `betas[1]` is used as beta2; you may also pass
+`beta2=` directly (it wins over `betas[1]` if both are given). Handed a whole model, 2-D
+matrices get the factored Ember update and any non-2-D parameter (biases, norms, 1-D) falls
+back to a plain scaled-SGD step, so the optimizer never errors. For best results route only
+the embedding / LM-head to Ember and keep your usual optimizer (AdamW / Muon) on the body —
+see `split_embedding_params` below.
+
+Update, for an embedding gradient G in R^{V x D} (sparse over V — only rows of tokens in the
 batch get a gradient):
 
     r[i] <- b2*r[i] + (1-b2) * mean_j(G[i,j]^2)            # per-row 2nd moment, all rows
@@ -52,12 +67,31 @@ def _local(x):
 
 
 class Ember(torch.optim.Optimizer):
-    def __init__(self, params, lr=1e-3, beta2=0.999, eps=1e-8, weight_decay=0.0,
-                 row_shard_group=None):
-        """row_shard_group: the process group the embedding rows are sharded over. Leave
-        None for single-device / DDP / FSDP2 (auto-detected from DTensor). Set it for
-        non-DTensor frameworks (Megatron tensor-parallel, etc.)."""
-        defaults = dict(lr=lr, beta2=beta2, eps=eps, weight_decay=weight_decay,
+    """Factored O(V+D) second-moment optimizer for 2-D token-table matrices.
+
+    Drop-in for torch.optim.Adam: same constructor signature, same Optimizer API
+    (`step`, `zero_grad`, `state_dict`/`load_state_dict` come for free). 2-D params get the
+    factored Ember update; non-2-D params fall back to a plain scaled-SGD step so the
+    optimizer never errors when handed a whole model.
+    """
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0,
+                 beta2=None, row_shard_group=None):
+        """Args mirror torch.optim.Adam.
+
+        betas: (beta1, beta2) like Adam. Ember has no first moment, so beta1 (betas[0]) is
+            ignored; betas[1] is used as the second-moment decay.
+        beta2: optional explicit override for the second-moment decay. If given, it wins over
+            betas[1] (lets you write either `Ember(p, betas=(0.9, 0.999))` or
+            `Ember(p, beta2=0.999)`).
+        row_shard_group: the process group the embedding rows are sharded over. Leave None for
+            single-device / DDP / FSDP2 (auto-detected from DTensor). Set it for non-DTensor
+            frameworks (Megatron tensor-parallel, etc.).
+        """
+        b2 = betas[1] if beta2 is None else beta2
+        if not 0.0 <= b2 < 1.0:
+            raise ValueError(f"Invalid beta2: {b2}")
+        defaults = dict(lr=lr, beta2=b2, eps=eps, weight_decay=weight_decay,
                         row_shard_group=row_shard_group)
         super().__init__(params, defaults)
 
@@ -72,8 +106,16 @@ class Ember(torch.optim.Optimizer):
                     continue
                 pg = group.get("row_shard_group") or _row_shard_group(p)
                 p_l, g_l = _local(p), _local(p.grad)
+
+                # Non-2-D params (biases, norms, 1-D): plain scaled-SGD fallback so a whole
+                # model can be handed to Ember without crashing. Route these to your real
+                # optimizer (AdamW/Muon) in practice; Ember's win is on the 2-D token table.
                 if p_l.dim() != 2:
-                    raise ValueError("Ember is for 2-D embedding tables (V x D).")
+                    if wd != 0.0:
+                        p_l.mul_(1 - lr * wd)
+                    p_l.add_(g_l, alpha=-lr)
+                    continue
+
                 Vloc, D = p_l.shape
                 state = self.state[p]
                 if not state:
@@ -123,9 +165,9 @@ def split_embedding_params(model, extra_names=()):
         opt_emb, opt_other = Ember(emb, lr=1e-3), torch.optim.AdamW(other, lr=3e-4)
 
     Embedding = the .weight of any nn.Embedding, or any 2-D parameter whose name contains
-    embed / wte / tok_emb / word_embeddings (+ `extra_names`). Tied weights de-duped.
+    embed / wte / tok_emb / word_embeddings / lm_head (+ `extra_names`). Tied weights de-duped.
     """
-    keys = ("embed", "wte", "tok_emb", "word_embeddings") + tuple(extra_names)
+    keys = ("embed", "wte", "tok_emb", "word_embeddings", "lm_head") + tuple(extra_names)
     emb_ids = {id(m.weight) for m in model.modules()
                if isinstance(m, nn.Embedding) and m.weight is not None}
     emb, other, seen = [], [], set()
