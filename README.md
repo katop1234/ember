@@ -1,4 +1,6 @@
-# Ember
+<p align="center">
+  <img src="assets/ember-logo.png" alt="Ember" width="440">
+</p>
 
 Ember is a drop-in optimizer for embedding / LM-head matrices that uses **O(V + D)** optimizer
 state instead of Adam's **O(2·V·D)**, at matched quality. About **1500× less** optimizer memory
