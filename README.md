@@ -19,33 +19,36 @@ Or just copy [`ember.py`](ember.py) into your project — it's the whole optimiz
 
 ## Quickstart — a one-line diff from Adam
 
-`Ember` takes the **exact** `torch.optim.Adam` constructor signature, so swapping is literally
-one line and nothing else changes:
+Hand `Ember` the **model** and it figures out the routing itself — one line, nothing else changes:
 
 ```python
 from ember import Ember
 # was: optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-optimizer = Ember(model.parameters(), lr=1e-3)   # same call, ~D× less state on token tables
+optimizer = Ember(model, lr=1e-3)
 ```
 
-`Ember(params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)`. Ember has no first
-moment, so `betas[0]` is ignored and `betas[1]` is used as `beta2` (you can also pass `beta2=`
-directly; it wins if both are given). Handed a whole model, 2-D matrices get the factored Ember
-update and any non-2-D parameter (biases, norms, 1-D) falls back to a plain scaled-SGD step, so
-the optimizer never errors. `.step()`, `.zero_grad()`, and `state_dict`/`load_state_dict` are the
-standard `torch.optim.Optimizer` methods.
+Given the model, Ember puts its factored update on the **token tables only** — every
+`nn.Embedding` weight plus the LM head — and runs a standard **AdamW** on everything else
+(attention/MLP linears, norms, biases). **Hidden linear layers are never Embered.** It's a single
+optimizer with the usual `step()` / `zero_grad()` / `state_dict()` API.
 
-## Recommended usage — Ember on the token tables, your optimizer on the rest
+`Ember(model, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0, body_lr=None)`. `betas` /
+`eps` / `weight_decay` apply to the AdamW side; `betas[1]` (or an explicit `beta2=`) sets Ember's
+second moment. `body_lr` overrides the learning rate on the non-table params (defaults to `lr`).
+Tied embeddings are de-duped.
 
-The win is on the embedding / LM-head. Route those to Ember and keep AdamW (or Muon) on the body:
+## Recommended usage — a different optimizer on the body (e.g. Muon)
+
+`Ember(model, ...)` already keeps AdamW on the body. If you want **Muon** (or any other optimizer)
+on the body instead, split the params yourself and run two optimizers:
 
 ```python
 import torch
 from ember import Ember, split_embedding_params
 
-emb, other = split_embedding_params(model)         # embed/wte/lm_head -> emb; tied weights de-duped
+emb, other = split_embedding_params(model)         # nn.Embedding + lm_head -> emb; tied de-duped
 opt_emb   = Ember(emb, lr=1e-3)
-opt_other = torch.optim.AdamW(other, lr=3e-4)
+opt_other = torch.optim.AdamW(other, lr=3e-4)       # or Muon(other, ...)
 
 for batch in loader:
     loss = model(batch).loss
@@ -53,6 +56,9 @@ for batch in loader:
     loss.backward()
     opt_emb.step();      opt_other.step()
 ```
+
+(Handed an explicit param iterable like `Ember(emb, ...)`, Ember applies its factored update to
+every 2-D tensor you give it — so only pass it the token-table params.)
 
 ## What state it stores
 

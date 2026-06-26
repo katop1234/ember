@@ -1,8 +1,8 @@
 """CPU bare-test for Ember. No GPU. Run: python test_ember.py
 
-Checks the drop-in promise: Ember constructs with the *exact* torch.optim.Adam call
-signature, trains a toy embedding model (loss down, no NaN), routes a whole model without
-crashing on non-2-D params, and round-trips its state_dict.
+Checks the drop-in promise: `Ember(model, lr=...)` auto-routes the token tables (nn.Embedding
++ LM head) to the factored Ember update and everything else to AdamW — hidden linears are
+never Embered — trains (loss down, no NaN), and round-trips its state_dict.
 """
 import torch
 import torch.nn as nn
@@ -18,77 +18,78 @@ class Toy(nn.Module):
     def __init__(self):
         super().__init__()
         self.embed_tokens = nn.Embedding(V, D)
-        self.body = nn.Linear(D, D)          # has a 2-D weight + a 1-D bias
-        self.lm_head = nn.Linear(D, V, bias=False)
+        self.attn = nn.Linear(D, D)          # hidden linear: must NOT be Embered
+        self.mlp = nn.Linear(D, D)           # hidden linear: must NOT be Embered
+        self.lm_head = nn.Linear(D, V, bias=False)   # output token table -> Ember
 
     def forward(self, idx):
-        return self.lm_head(torch.tanh(self.body(self.embed_tokens(idx))))
+        h = torch.tanh(self.attn(self.embed_tokens(idx)))
+        return self.lm_head(torch.tanh(self.mlp(h)))
 
 
-# --- 1. exact Adam constructor signature is accepted ---------------------------------------
-m = Toy()
-opt = Ember(m.parameters(), lr=1e-2, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
-# betas[1] became beta2; betas[0] ignored (Ember has no first moment)
-assert opt.param_groups[0]["beta2"] == 0.999, "betas[1] should set beta2"
-# explicit beta2= overrides betas[1]
-opt_b2 = Ember(m.parameters(), lr=1e-3, betas=(0.9, 0.999), beta2=0.99)
-assert opt_b2.param_groups[0]["beta2"] == 0.99, "explicit beta2= should win over betas[1]"
-print("[1] Adam-compatible constructor OK (betas tuple + beta2 override)")
-
-# --- 2. whole-model step does not crash on non-2-D params (bias) ---------------------------
 idx = torch.randint(0, V, (32, 8))
 tgt = torch.randint(0, V, (32, 8))
-e0 = m.embed_tokens.weight.detach().clone()
-bias0 = m.body.bias.detach().clone()
+
+# --- 1. Ember(model) auto-routing: tables -> Ember, hidden linears -> AdamW ----------------
+m = Toy()
+opt = Ember(m, lr=1e-2, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
+modes = {g["mode"] for g in opt.param_groups}
+assert modes == {"ember", "adamw"}, f"expected ember+adamw groups, got {modes}"
+ember_ids = {id(p) for g in opt.param_groups if g["mode"] == "ember" for p in g["params"]}
+adamw_ids = {id(p) for g in opt.param_groups if g["mode"] == "adamw" for p in g["params"]}
+assert id(m.embed_tokens.weight) in ember_ids, "embedding -> Ember"
+assert id(m.lm_head.weight) in ember_ids, "lm_head -> Ember"
+assert id(m.attn.weight) in adamw_ids, "attn linear must NOT be Embered"
+assert id(m.mlp.weight) in adamw_ids, "mlp linear must NOT be Embered"
+assert id(m.attn.bias) in adamw_ids, "biases -> AdamW"
+print("[1] Ember(model) routes only nn.Embedding + lm_head to Ember; hidden linears -> AdamW")
+
+# --- 2. trains, and state proves the routing (r/c on tables, m/v on the body) --------------
 losses = []
 for _ in range(60):
     loss = F.cross_entropy(m(idx).reshape(-1, V), tgt.reshape(-1))
-    opt.zero_grad()
-    loss.backward()
-    opt.step()
+    opt.zero_grad(); loss.backward(); opt.step()
     assert torch.isfinite(loss), "NaN/inf loss"
     losses.append(loss.item())
-assert losses[-1] < losses[0] - 0.1, f"loss did not decrease: {losses[0]:.3f}->{losses[-1]:.3f}"
-assert not torch.allclose(m.embed_tokens.weight, e0), "Ember did not move the 2-D embedding"
-assert not torch.allclose(m.body.bias, bias0), "non-2-D bias fallback did not move the bias"
-print(f"[2] whole-model train OK: loss {losses[0]:.3f} -> {losses[-1]:.3f}, no NaN, 1-D bias moved")
+assert losses[-1] < losses[0] - 0.1, f"loss did not fall: {losses[0]:.3f}->{losses[-1]:.3f}"
+assert set(opt.state[m.embed_tokens.weight]) >= {"r", "c"}, "embedding should hold factored r/c"
+assert "m" not in opt.state[m.embed_tokens.weight], "embedding should have NO first moment"
+assert set(opt.state[m.attn.weight]) >= {"m", "v"}, "hidden linear should hold AdamW m/v"
+assert "r" not in opt.state[m.attn.weight], "hidden linear must NOT have Ember r/c"
+print(f"[2] train OK: loss {losses[0]:.3f}->{losses[-1]:.3f}; tables hold r/c, body holds m/v")
 
-# --- 3. recommended usage: Ember on embed/lm_head, AdamW on the body -----------------------
+# --- 3. Adam-compatible constructor (betas tuple + beta2 override) --------------------------
+o = Ember(m, lr=1e-3, betas=(0.9, 0.999))
+assert all(g["beta2"] == 0.999 for g in o.param_groups), "betas[1] -> beta2"
+o2 = Ember(m, lr=1e-3, betas=(0.9, 0.999), beta2=0.99)
+assert all(g["beta2"] == 0.99 for g in o2.param_groups), "explicit beta2= wins"
+print("[3] Adam-compatible constructor OK (betas tuple + beta2 override)")
+
+# --- 4. explicit-params path still works (you split yourself) ------------------------------
 m2 = Toy()
 emb, other = split_embedding_params(m2)
-emb_ids = {id(p) for p in emb}
-assert id(m2.embed_tokens.weight) in emb_ids, "embed -> Ember"
-assert id(m2.lm_head.weight) in emb_ids, "lm_head -> Ember"
-assert id(m2.body.weight) not in emb_ids, "body weight -> other"
-opt_emb = Ember(emb, lr=1e-2)
-opt_other = torch.optim.AdamW(other, lr=1e-2)
+assert id(m2.embed_tokens.weight) in {id(p) for p in emb} and id(m2.attn.weight) in {id(p) for p in other}
+opt_emb, opt_other = Ember(emb, lr=1e-2), torch.optim.AdamW(other, lr=1e-2)
 for _ in range(20):
     loss = F.cross_entropy(m2(idx).reshape(-1, V), tgt.reshape(-1))
-    opt_emb.zero_grad(); opt_other.zero_grad()
-    loss.backward()
-    opt_emb.step(); opt_other.step()
+    opt_emb.zero_grad(); opt_other.zero_grad(); loss.backward(); opt_emb.step(); opt_other.step()
     assert torch.isfinite(loss)
-print("[3] split routing (Ember on token tables + AdamW on body) OK")
+print("[4] explicit split (Ember on tables + AdamW on body) OK")
 
-# --- 4. state_dict round-trips -------------------------------------------------------------
+# --- 5. state_dict round-trips -------------------------------------------------------------
 sd = opt.state_dict()
-opt_new = Ember(m.parameters(), lr=1e-2, betas=(0.9, 0.999))
+opt_new = Ember(m, lr=1e-2, betas=(0.9, 0.999))
 opt_new.load_state_dict(sd)
-# the row/col factors and step count survive the round-trip
-s_old = next(iter(opt.state.values()))
-s_new = next(iter(opt_new.state.values()))
-assert s_new["t"] == s_old["t"], "step count did not round-trip"
-assert torch.allclose(s_new["r"], s_old["r"]), "row factor did not round-trip"
-assert torch.allclose(s_new["c"], s_old["c"]), "col factor did not round-trip"
-print("[4] state_dict round-trip OK")
+s_old, s_new = opt.state[m.embed_tokens.weight], opt_new.state[m.embed_tokens.weight]
+assert s_new["t"] == s_old["t"] and torch.allclose(s_new["r"], s_old["r"]) and torch.allclose(s_new["c"], s_old["c"])
+print("[5] state_dict round-trip OK")
 
-# --- 5. one-line drop-in: literally the Adam call, swapped -----------------------------------
-m3 = Toy()
-# was: optimizer = torch.optim.Adam(m3.parameters(), lr=1e-3)
-optimizer = Ember(m3.parameters(), lr=1e-3)
-loss = F.cross_entropy(m3(idx).reshape(-1, V), tgt.reshape(-1))
-optimizer.zero_grad(); loss.backward(); optimizer.step()
-assert torch.isfinite(loss)
-print("[5] one-line Adam->Ember drop-in OK")
+# --- 6. helpful error when a model has no token tables -------------------------------------
+try:
+    Ember(nn.Sequential(nn.Linear(4, 4)), lr=1e-3)
+    raise AssertionError("should have raised: no embedding tables")
+except ValueError as e:
+    assert "no nn.Embedding" in str(e)
+print("[6] clear error when model has no embedding tables")
 
 print("\nALL TESTS PASSED")
