@@ -2,6 +2,10 @@
   <img src="assets/ember-logo.png" alt="Ember" width="440">
 </p>
 
+<p align="center">
+  📄 <b>Paper:</b> <a href="https://arxiv.org/abs/2607.01455">Token Geometry (arXiv:2607.01455)</a>
+</p>
+
 Ember is a drop-in optimizer for embedding / LM-head matrices that uses **O(V + D)** optimizer
 state instead of Adam's **O(2·V·D)**, at matched quality. About **1500× less** optimizer memory
 for the embedding at a 50K vocab × 768 dim — and the gap grows with vocabulary.
