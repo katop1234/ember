@@ -14,6 +14,21 @@ Ember stores a row × column factored second moment and **no first moment**. The
 per-coordinate update scale factorizes (token participation × feature), so the full `V×D` second
 moment is redundant — `V + D` captures it. The only knob is `beta2` (default `0.999`).
 
+## What we've measured (July 2026)
+
+- **Quality parity with tuned Adam, on Adam's home turf.** Inside the [modded-nanogpt speedrun](https://github.com/KellerJordan/modded-nanogpt) — the most heavily Adam-tuned public benchmark — swapping Adam→Ember on the token tables at each optimizer's own tuned optimum differs by ~0.001 val loss, within seed noise (n=10 vs n=15 runs at 8×H100, p≈0.1).
+- **Used inside a faster-than-world-record recipe.** An Ember-carrying recipe reached the speedrun target in fewer steps than the standing record, certified under the leaderboard's own statistical rules (n=10, mean ≤3.28 at p=0.002 at the reduced budget). PR in preparation.
+- **Memory:** ~1500× less optimizer state at GPT-2 scale (2 GB → ~400 KB at Pythia-2.8B); ~3 GB lower peak VRAM measured at speedrun scale.
+- **Late-training stability:** dense Adam's per-coordinate second moment goes stale on rare rows and throws transiently oversized steps (measured 10²–10⁴× calibrated) late in training; Ember's row statistic is refreshed by whole-row traffic and stays within ~1–3× throughout.
+- **One config covers the whole token interface.** Extending the identical Ember recipe from output-side tables to the input embedding was parity-or-slightly-better in 3/3 paired trials — no per-table hyperparameter tuning needed.
+
+## Distributed notes (the practical wins)
+
+1. **Replicate, don't shard.** State is V+D floats (~1 MB) — every rank keeps a full copy; token tables drop out of ZeRO/FSDP optimizer-state sharding entirely.
+2. **Sync is one tiny all-reduce** (~D+3 floats, below NCCL's latency floor — effectively free), vs Adam's sharded 2·V·D gather/scatter machinery.
+3. **Deterministic by construction.** Stats are built with contiguous reductions only — never `index_add_`/`scatter_add_` atomics — so the optimizer update is **bitwise identical at any world size** (verified 1×/2×/4×/8×). Invaluable for debugging distributed training.
+4. **No V×D materialization needed.** The factored denominator applies as two broadcasted scalings; the state never exceeds V+D.
+
 ## Install
 ```bash
 pip install -e .

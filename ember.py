@@ -157,10 +157,15 @@ class Ember(torch.optim.Optimizer):
         t, r, c = state["t"], state["r"], state["c"]
         g32 = g_l.float()
 
+        # Determinism rule (hard-won): build stats with contiguous reductions ONLY — never
+        # index_add_/scatter_add_ (atomic float order differs run-to-run and across world
+        # sizes). sum/mean + one all_reduce keeps the update bitwise identical at any scale.
         r.mul_(b2).add_(g32.pow(2).mean(dim=1), alpha=1 - b2)          # per-row, local
         col_sum = g32.pow(2).sum(dim=0)
         n_active = (g32.abs().sum(dim=1) > 0).sum().float()
         if pg is not None:
+            # Total sync payload is D+3 floats (~3 KB): below NCCL's latency floor, so the
+            # cross-rank sync is effectively free. State is replicated, never sharded.
             dist.all_reduce(col_sum, group=pg)
             dist.all_reduce(n_active, group=pg)
         c.mul_(b2).add_(col_sum / n_active.clamp(min=1), alpha=1 - b2)  # per-col, active rows
@@ -176,6 +181,8 @@ class Ember(torch.optim.Optimizer):
         else:
             scale = r_hat.mean().clamp(min=1e-30)
 
+        # V x D here is a step-TRANSIENT, not state (state stays V+D). For very large
+        # tables, apply as two broadcasted scalings (rows, then cols) to skip even this.
         denom = (r_hat.unsqueeze(1) * c_hat.unsqueeze(0) / scale).sqrt().add_(eps)
         if wd != 0.0:
             p_l.mul_(1 - lr * wd)
