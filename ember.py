@@ -12,8 +12,8 @@ Usage (one-line swap):
     optimizer = Ember(model, lr=1e-3)
 
 Given a model, Ember applies the factored update to token tables only (every nn.Embedding +
-the LM head) and internal AdamW to everything else — the single-optimizer convention of
-Muon's aux-Adam classes (github.com/KellerJordan/Muon). Hidden linears are never Embered.
+the LM head) and a standard internal AdamW to everything else, so it works as one optimizer
+with the usual step()/zero_grad()/state_dict() API. Hidden linears are never Embered.
 
 Distributed: state is ~1 MB, so it is replicated, never sharded — token tables drop out of
 ZeRO/FSDP optimizer-state sharding. Row-sharded tables (FSDP2/vocab-parallel) need one
@@ -100,7 +100,7 @@ def ember_update(p_l, g_l, state, lr, beta2, eps, wd, pg=None):
 
 
 def adam_update(p, g, state, lr, betas, eps, wd):
-    """Standard AdamW for the non-table params (same aux pattern as Muon's adam_update)."""
+    """Standard AdamW for the non-table params (the body of the model)."""
     if not state:
         state["t"] = 0
         state["m"] = torch.zeros_like(p, dtype=torch.float32)
