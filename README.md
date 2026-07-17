@@ -57,7 +57,6 @@ opt_other = Muon(other, lr=2e-2)         # or torch.optim.AdamW(other, ...)
 ## What we've measured (July 2026)
 
 - **Parity with tuned Adam on Adam's home turf.** In the [modded-nanogpt speedrun](https://github.com/KellerJordan/modded-nanogpt) — the most heavily Adam-tuned public benchmark — swapping Adam→Ember on the token tables at each optimizer's own optimum differs by ~0.001 val loss, within seed noise.
-- **Inside a faster-than-record recipe.** An Ember-carrying recipe reached the speedrun target under the leaderboard's statistical rules in fewer steps than the standing record (PR in preparation).
 - **Memory:** 2 GB → ~400 KB optimizer state at Pythia-2.8B; ~3 GB lower peak VRAM at speedrun scale.
 - **Late-training stability:** Adam's dense second moment goes stale on rare rows and throws transiently oversized steps (measured 10²–10⁴× calibrated); Ember's row statistic is refreshed by whole-row traffic and stays ~1–3× throughout.
 - **One config, whole token interface.** The same recipe on input embedding + LM-head tables was parity-or-better in every paired trial — no per-table tuning.
