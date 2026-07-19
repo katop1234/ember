@@ -70,7 +70,7 @@ def ember_update(p_l, g_l, state, lr, beta2, eps, wd, pg=None):
         state["c"] = torch.zeros(D, dtype=torch.float32, device=p_l.device)
     state["t"] += 1
     t, r, c = state["t"], state["r"], state["c"]
-    g32 = g_l.float()
+    g32 = g_l.float()  # cast once, reuse for every stat — repeated casts dominate at table scale
 
     # Stats use contiguous reductions ONLY — never index_add_/scatter_add_ (atomic float
     # order breaks run-to-run and cross-world-size determinism).
@@ -78,7 +78,11 @@ def ember_update(p_l, g_l, state, lr, beta2, eps, wd, pg=None):
     col_sum = g32.pow(2).sum(dim=0)
     n_active = (g32.abs().sum(dim=1) > 0).sum().float()  # only rows in the batch carry signal
     if pg is not None:
-        dist.all_reduce(col_sum, group=pg)   # ~D+3 floats total: effectively free
+        # Pass a DEDICATED small group as pg, not your main comm: NCCL runs collectives
+        # in issue order per communicator, so a ~KB stats message queued behind large grad
+        # collectives stalls compute (~2% step time measured). Pack these into one buffer
+        # if latency-bound.
+        dist.all_reduce(col_sum, group=pg)
         dist.all_reduce(n_active, group=pg)
     c.mul_(beta2).add_(col_sum / n_active.clamp(min=1), alpha=1 - beta2)
 
