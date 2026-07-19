@@ -22,7 +22,6 @@ It stores a row × column factored second moment and **no first moment**. The on
   stall compute.
 - Stats are built with contiguous reductions only (no atomics) → runs are **bitwise
   reproducible** at a fixed world size, and mathematically identical across world sizes.
-  Debugging distributed training stops being archaeology.
 - The update touches only the gradient and the weights (no m/v buffers): **~3× less memory
   traffic than Adam's step**. Imperceptible in step time — the win is state memory.
 
