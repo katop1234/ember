@@ -16,10 +16,15 @@ It stores a row × column factored second moment and **no first moment**. The on
 **Distributed-training aware, by design:**
 - State is ~1 MB → **replicated, never sharded**. Token tables drop out of ZeRO/FSDP
   optimizer-state sharding entirely.
-- Row-sharded tables sync with **one ~D-float all-reduce** per step — below NCCL's latency
-  floor, effectively free.
-- Stats are built with contiguous reductions only (no atomics) → updates are **bitwise
-  identical at any world size**. Debugging distributed training stops being archaeology.
+- Row-sharded tables sync with **one ~D-float all-reduce** per step. Issue it on a
+  dedicated small communicator (see `ember.py`): NCCL executes collectives in issue order,
+  so even a KB-scale message queued on the main comm behind large gradient collectives can
+  stall compute.
+- Stats are built with contiguous reductions only (no atomics) → runs are **bitwise
+  reproducible** at a fixed world size, and mathematically identical across world sizes.
+  Debugging distributed training stops being archaeology.
+- The update touches only the gradient and the weights (no m/v buffers): **~3× less memory
+  traffic than Adam's step**. Imperceptible in step time — the win is state memory.
 
 ## Install
 ```bash
