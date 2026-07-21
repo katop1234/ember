@@ -1,8 +1,8 @@
 """Ember — an O(V+D) optimizer for token-embedding / LM-head tables.
 
 Adam stores 2*V*D optimizer state for a V x D embedding (~300 MB at 50K x 768). Ember stores
-V + D (~1 MB, ~1500x less) at matched quality: a row vector r and a column vector c whose
-outer product reconstructs the second moment, v[i,j] ~ r[i]*c[j]/mean(r). No first moment
+V + D (~1 MB, ~1500x less) at matched quality: a row vector r, a column vector c, and a
+scalar s reconstruct the second moment as v[i,j] ~ r[i]*c[j]/s. No first moment
 (token-table gradients have ~zero autocorrelation); bias correction and beta2 come from Adam.
 
 Usage (one-line swap):
@@ -18,7 +18,7 @@ with the usual step()/zero_grad()/state_dict() API. Hidden linears are never Emb
 Distributed: state is ~1 MB, so it is replicated, never sharded — token tables drop out of
 ZeRO/FSDP optimizer-state sharding. Row-sharded tables (FSDP2/vocab-parallel) need one
 ~D-float all-reduce per step (below NCCL's latency floor); auto-detected for DTensor, or
-pass row_shard_group. Updates are bitwise identical at any world size.
+pass row_shard_group. Updates are bitwise reproducible at fixed world size.
 """
 import torch
 import torch.nn as nn
@@ -62,42 +62,39 @@ def split_embedding_params(model, extra_names=(), lm_head=True):
 
 
 def ember_update(p_l, g_l, state, lr, beta2, eps, wd, pg=None):
-    """Factored second-moment update for one 2-D table (local shard p_l, grad g_l)."""
+    """Factored second-moment update for one 2-D table (local shard p_l, grad g_l).
+    This is the estimator deployed in the NanoGPT-speedrun record run."""
     Vloc, D = p_l.shape
     if not state:
         state["t"] = 0
         state["r"] = torch.zeros(Vloc, dtype=torch.float32, device=p_l.device)
         state["c"] = torch.zeros(D, dtype=torch.float32, device=p_l.device)
+        state["s"] = torch.zeros((), dtype=torch.float32, device=p_l.device)
+        n_rows = torch.tensor(float(Vloc), device=p_l.device)
+        if pg is not None:
+            dist.all_reduce(n_rows, group=pg)  # once, at init
+        state["n_rows"] = n_rows.item()
     state["t"] += 1
-    t, r, c = state["t"], state["r"], state["c"]
+    t, r, c, s, n_rows = state["t"], state["r"], state["c"], state["s"], state["n_rows"]
     g32 = g_l.float()  # cast once, reuse for every stat — repeated casts dominate at table scale
 
     # Stats use contiguous reductions ONLY — never index_add_/scatter_add_ (atomic float
-    # order breaks run-to-run and cross-world-size determinism).
-    r.mul_(beta2).add_(g32.pow(2).mean(dim=1), alpha=1 - beta2)
+    # order breaks run-to-run determinism).
     col_sum = g32.pow(2).sum(dim=0)
-    n_active = (g32.abs().sum(dim=1) > 0).sum().float()  # only rows in the batch carry signal
     if pg is not None:
-        # Pass a DEDICATED small group as pg, not your main comm: NCCL runs collectives
-        # in issue order per communicator, so a ~KB stats message queued behind large grad
-        # collectives stalls compute (~2% step time measured). Pack these into one buffer
-        # if latency-bound.
+        # The ONLY per-step collective. Pass a DEDICATED small group as pg, not your main
+        # comm: NCCL runs collectives in issue order per communicator, so a ~KB message
+        # queued behind large grad collectives stalls compute (~2% step time measured).
         dist.all_reduce(col_sum, group=pg)
-        dist.all_reduce(n_active, group=pg)
-    c.mul_(beta2).add_(col_sum / n_active.clamp(min=1), alpha=1 - beta2)
+    r.mul_(beta2).add_(g32.pow(2).mean(dim=1), alpha=1 - beta2)  # local rows: no comms
+    c.mul_(beta2).add_(col_sum / n_rows, alpha=1 - beta2)
+    s.mul_(beta2).add_(col_sum.sum() / (n_rows * D), alpha=1 - beta2)
 
     bc = 1 - beta2 ** t  # bias correction: prevents rare-row blowups on cold stats
-    r_hat, c_hat = r / bc, c / bc
-    if pg is not None:
-        rsum, rcnt = r_hat.sum(), torch.tensor(float(r_hat.numel()), device=p_l.device)
-        dist.all_reduce(rsum, group=pg)
-        dist.all_reduce(rcnt, group=pg)
-        scale = (rsum / rcnt).clamp(min=1e-30)
-    else:
-        scale = r_hat.mean().clamp(min=1e-30)
-
+    # v[i,j] = r[i]*c[j]/s; the three bias corrections net to a single 1/bc.
     # V x D below is a step-transient, not state; for huge tables apply as two broadcasts.
-    denom = (r_hat.unsqueeze(1) * c_hat.unsqueeze(0) / scale).sqrt().add_(eps)
+    v_hat = r.unsqueeze(1) * c.unsqueeze(0) / (s.clamp(min=1e-30) * bc)
+    denom = v_hat.sqrt_().add_(eps)
     if wd != 0.0:
         p_l.mul_(1 - lr * wd)
     p_l.addcdiv_(g_l, denom.to(p_l.dtype), value=-lr)
