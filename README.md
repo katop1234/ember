@@ -6,6 +6,8 @@
   📄 <b>Paper:</b> <a href="https://arxiv.org/abs/2607.01455">Token Geometry (arXiv:2607.01455)</a>
 </p>
 
+> 🏁 **Ember has been submitted for the new NanoGPT speedrun world record** — <a href="https://github.com/KellerJordan/modded-nanogpt/pull/346">PR&nbsp;#346</a>, July 23, 2026 (pending review).
+
 The embedding table and LM-head are a language model's read/write interface between discrete
 tokens and continuous computation. Their gradient geometry is different from dense hidden
 weights — Ember exploits that: a drop-in optimizer for token tables using **O(V + D)** state
