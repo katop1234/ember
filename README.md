@@ -6,7 +6,7 @@
   📄 <b>Paper:</b> <a href="https://arxiv.org/abs/2607.01455">Token Geometry (arXiv:2607.01455)</a>
 </p>
 
-> 🏁 **Submitted a NanoGPT speedrun record attempt** — <a href="https://github.com/KellerJordan/modded-nanogpt/pull/346">PR&nbsp;#346</a>, in review (July 23, 2026): 1384 steps, −6 vs. prior record. n=30 replications on 2×8×H100 (Prime Intellect + Vast), mean final val loss 3.2788 — one-sided t-test vs. the 3.28 target: p&nbsp;=&nbsp;0.000125.
+> 🏁 **Submitted a NanoGPT speedrun record PR** — <a href="https://github.com/KellerJordan/modded-nanogpt/pull/346">PR&nbsp;#346</a>, in review (July 23, 2026): 1384 steps, −6 vs. prior record. n=30 replications on 2×8×H100 (Prime Intellect + Vast), mean final val loss 3.2788 — one-sided t-test vs. the 3.28 target: p&nbsp;=&nbsp;0.000125.
 
 The embedding table and LM-head are a language model's read/write interface between discrete
 tokens and continuous computation. Their gradient geometry is different from dense hidden
