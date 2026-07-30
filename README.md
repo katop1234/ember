@@ -69,9 +69,8 @@ opt_other = Muon(other, lr=2e-2)   # or torch.optim.AdamW(other, ...)
 
 ## Integration notes
 
-- **Schedulers:** HF Trainer can zero per-group lr — verify it's nonzero.
-- **Precision:** we recommend keeping the state at fp32 — we noticed bf16 underflows on rare rows.
-- **Momentum:** raw re-add diverges.
+- **HF Trainer schedulers can zero your lr** — verify `param_groups[i]['lr']` ≠ 0 after the first scheduler step.
+- **We recommend keeping the state at fp32** — we noticed bf16 underflows on rare rows.
 
 ## Distributed reference
 
