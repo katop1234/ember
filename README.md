@@ -67,6 +67,13 @@ opt_other = Muon(other, lr=2e-2)   # or torch.optim.AdamW(other, ...)
   oversized steps late in training; Ember's row statistic stays 1–3× throughout.
 - **One config for the whole token interface** — input table + LM-head, no per-table tuning.
 
+## Integration notes
+
+- **Schedulers:** HF Trainer can zero per-group lr — verify it's nonzero.
+- **Precision:** state must stay fp32 — bf16 underflows on rare rows.
+- **Tiny batches:** starve table gradients (GRPO b2–8 stalled; b256 fine).
+- **Momentum:** raw re-add diverges.
+
 ## Distributed reference
 
 | setup | what you do |
