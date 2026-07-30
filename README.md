@@ -71,7 +71,6 @@ opt_other = Muon(other, lr=2e-2)   # or torch.optim.AdamW(other, ...)
 
 - **Schedulers:** HF Trainer can zero per-group lr — verify it's nonzero.
 - **Precision:** state must stay fp32 — bf16 underflows on rare rows.
-- **Tiny batches:** starve table gradients (GRPO b2–8 stalled; b256 fine).
 - **Momentum:** raw re-add diverges.
 
 ## Distributed reference
